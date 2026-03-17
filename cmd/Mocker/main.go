@@ -39,7 +39,10 @@ func run() {
 	// CLONE_NEWUTS gives the child its own UTS namespace
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS |
-			syscall.CLONE_NEWPID,
+			syscall.CLONE_NEWPID |
+			syscall.CLONE_NEWNS |
+			syscall.CLONE_NEWNET |
+			syscall.CLONE_NEWIPC,
 	}
 
 	if err := cmd.Run(); err != nil {
@@ -52,6 +55,13 @@ func child() {
 	// This code runs inside the new namespace
 	// Set a custom hostname - this won't affect the host
 	syscall.Sethostname([]byte("mocker-container"))
+
+	// Set private file root
+	// Set mount namespace so container has its own file system
+	// Unmount once process is finished
+	syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, "")
+	syscall.Mount("proc", "/proc", "proc", 0, "")
+	defer syscall.Unmount("/proc", syscall.MNT_DETACH)
 
 	// Run whatever command was passed in
 	// e.g. /bin/sh
