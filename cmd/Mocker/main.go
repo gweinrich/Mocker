@@ -12,29 +12,54 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var memLimit int
+var cpuPercent int
+
 var rootCmd = &cobra.Command{
 	Use:     "Mocker",
 	Short:   "A minimal container runtime",
 	Version: "0.1.0",
 }
 
+var runCmd = &cobra.Command{
+	Use:   "run",
+	Short: "Run a container",
+	Run: func(cmd *cobra.Command, args []string) {
+		run(args)
+	},
+}
+
+func init() {
+	runCmd.Flags().IntVar(&memLimit, "memory", 0, "Memory limit in MB")
+	runCmd.Flags().IntVar(&cpuPercent, "cpu", 0, "CPU limit as percentage")
+	rootCmd.AddCommand(runCmd)
+}
+
 func main() {
-	// "run" is the first argument passed to the program
-	// e.g. "go run main.go run /bin/sh"
-	switch os.Args[1] {
-	case "run":
-		run()
-	case "child":
+	if len(os.Args) > 1 && os.Args[1] == "child" {
 		child()
+		return
+	}
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
 }
 
-func run() {
+func run(args []string) {
 	// Re-run this same program but with "child" as the argument
 	// This is a common pattern for namespace setup
 	containerID := generateID()
 
-	cmd := exec.Command("/proc/self/exe", append([]string{"child", containerID}, os.Args[2:]...)...)
+	// Set up cgroup before starting container
+	// For now hardcode limits, CLI flags come later
+	if err := setupCgroup(containerID, 128, 50); err != nil {
+		fmt.Println("Error setting up cgroup:", err)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command("/proc/self/exe", append([]string{"child", containerID}, args...)...)
 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -54,7 +79,7 @@ func run() {
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
-	cleanupContainer("c1")
+	cleanupContainer(containerID)
 }
 
 func child() {
@@ -63,6 +88,12 @@ func child() {
 	syscall.Sethostname([]byte("mocker-container"))
 
 	containerID := os.Args[2] // now passed from run()
+
+	// Join the cgroup immediately
+	if err := addToCgroup(containerID, os.Getpid()); err != nil {
+		fmt.Println("Error joining cgroup:", err)
+		os.Exit(1)
+	}
 
 	if err := createContainerDirs(containerID); err != nil {
 		fmt.Println("Error creating container dirs:", err)
@@ -74,10 +105,6 @@ func child() {
 		os.Exit(1)
 	}
 
-	// Set up the overlay filesystem
-	createContainerDirs(containerID)
-	mountOverlay(containerID)
-
 	mergedDir := filepath.Join(os.Getenv("HOME"), "projects", "Mocker", "containers", containerID, "merged")
 
 	// Set private file root
@@ -88,6 +115,10 @@ func child() {
 	// Pivot root to the container's merged directory
 	syscall.Chroot(mergedDir)
 	syscall.Chdir("/")
+
+	// Mount /sys so CPU info is accessible
+	syscall.Mount("sysfs", "/sys", "sysfs", 0, "")
+	defer syscall.Unmount("/sys", syscall.MNT_DETACH)
 
 	syscall.Mount("proc", "/proc", "proc", 0, "")
 	defer syscall.Unmount("/proc", syscall.MNT_DETACH)
@@ -153,4 +184,51 @@ func generateID() string {
 	b := make([]byte, 3)
 	rand.Read(b)
 	return hex.EncodeToString(b) // e.g. "a3f9c2"
+}
+
+func setupCgroup(containerID string, memLimitMB int, cpuPercent int) error {
+	// Enable memory and cpu controllers in the parent cgroup
+	err := os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control",
+		[]byte("+memory +cpu"), 0700)
+	if err != nil {
+		fmt.Println("Warning: could not enable controllers:", err)
+	}
+
+	cgPath := filepath.Join("/sys/fs/cgroup", "mocker-"+containerID)
+
+	// Create the cgroup directory
+	if err := os.MkdirAll(cgPath, 0755); err != nil {
+		return fmt.Errorf("creating cgroup: %w", err)
+	}
+
+	// Set memory limit (convert MB to bytes)
+	if memLimitMB > 0 {
+		memBytes := int64(memLimitMB) * 1024 * 1024
+		memFile := filepath.Join(cgPath, "memory.max")
+		if err := os.WriteFile(memFile, []byte(fmt.Sprintf("%d", memBytes)), 0700); err != nil {
+			return fmt.Errorf("setting memory limit: %w", err)
+		}
+	}
+
+	// Set CPU limit
+	if cpuPercent > 0 {
+		cpuFile := filepath.Join(cgPath, "cpu.max")
+		quota := cpuPercent * 1000
+		if err := os.WriteFile(cpuFile, []byte(fmt.Sprintf("%d 100000", quota)), 0700); err != nil {
+			return fmt.Errorf("setting cpu limit: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func addToCgroup(containerID string, pid int) error {
+	cgPath := filepath.Join("/sys/fs/cgroup", "mocker-"+containerID)
+	procsFile := filepath.Join(cgPath, "cgroup.procs")
+	return os.WriteFile(procsFile, []byte(fmt.Sprintf("%d", pid)), 0700)
+}
+
+func cleanupCgroup(containerID string) error {
+	cgPath := filepath.Join("/sys/fs/cgroup", "mocker-"+containerID)
+	return os.Remove(cgPath)
 }
