@@ -3,17 +3,27 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 )
 
 var memLimit int
 var cpuPercent int
+
+type Container struct {
+	ID      string   `json:"id"`
+	PID     int      `json:"pid"`
+	Status  string   `json:"status"`
+	Command []string `json:"command"`
+	Created string   `json:"created"`
+}
 
 var rootCmd = &cobra.Command{
 	Use:     "Mocker",
@@ -75,11 +85,30 @@ func run(args []string) {
 			syscall.CLONE_NEWIPC,
 	}
 
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
+
+	containerJSON := Container{
+		ID:      containerID,
+		PID:     cmd.Process.Pid,
+		Status:  "running",
+		Command: args,
+		Created: time.Now().Format(time.RFC3339),
+	}
+
+	if err := saveContainerState(containerJSON); err != nil {
+		fmt.Println("Error saving state:", err)
+	}
+
+	cmd.Wait()
+
+	containerJSON.Status = "stopped"
+	saveContainerState(containerJSON)
+
 	cleanupContainer(containerID)
+	cleanupCgroup(containerID)
 }
 
 func child() {
@@ -139,6 +168,19 @@ func child() {
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
+}
+
+func saveContainerState(c Container) error {
+	dir := filepath.Join(os.Getenv("HOME"), ".mocker", "containers")
+	os.MkdirAll(dir, 0755)
+
+	data, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(dir, c.ID+".json")
+	return os.WriteFile(path, data, 0644)
 }
 
 func createContainerDirs(containerID string) error {
