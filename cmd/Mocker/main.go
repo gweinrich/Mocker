@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,10 +40,19 @@ var runCmd = &cobra.Command{
 	},
 }
 
+var psCmd = &cobra.Command{
+	Use:   "ps",
+	Short: "List all running containers",
+	Run: func(cmd *cobra.Command, args []string) {
+		ps()
+	},
+}
+
 func init() {
 	runCmd.Flags().IntVar(&memLimit, "memory", 0, "Memory limit in MB")
 	runCmd.Flags().IntVar(&cpuPercent, "cpu", 0, "CPU limit as percentage")
 	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(psCmd)
 }
 
 func main() {
@@ -273,4 +283,24 @@ func addToCgroup(containerID string, pid int) error {
 func cleanupCgroup(containerID string) error {
 	cgPath := filepath.Join("/sys/fs/cgroup", "mocker-"+containerID)
 	return os.Remove(cgPath)
+}
+
+func ps() error {
+	dirPath := filepath.Join(os.Getenv("HOME"), ".mocker", "containers")
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return fmt.Errorf("Error reading directory: %w", err)
+	}
+
+	fmt.Printf("%-12s %-10s %-20s\n", "ID", "STATUS", "COMMAND")
+	for _, entry := range entries {
+		container := Container{}
+		data, _ := os.ReadFile(filepath.Join(dirPath, entry.Name()))
+		json.Unmarshal(data, &container)
+		if container.Status == "running" {
+			fmt.Printf("%-12s %-10s %-20s\n", container.ID, container.Status, strings.Join(container.Command, " "))
+		}
+	}
+
+	return nil
 }
