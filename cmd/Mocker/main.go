@@ -44,7 +44,32 @@ var psCmd = &cobra.Command{
 	Use:   "ps",
 	Short: "List all running containers",
 	Run: func(cmd *cobra.Command, args []string) {
-		ps()
+		if err := ps(); err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+	},
+}
+
+var stopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stops the given container if running",
+	Run: func(cmd *cobra.Command, args []string) {
+		if err := stop(args[0]); err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+	},
+}
+
+var rmCmd = &cobra.Command{
+	Use:   "rm",
+	Short: "Removes the given stopped container",
+	Run: func(cmd *cobra.Command, args []string) {
+		if err := remove(args[0]); err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
 	},
 }
 
@@ -53,9 +78,16 @@ func init() {
 	runCmd.Flags().IntVar(&cpuPercent, "cpu", 0, "CPU limit as percentage")
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(psCmd)
+	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(rmCmd)
 }
 
 func main() {
+	if os.Getuid() != 0 {
+		fmt.Println("Error: mocker must be run as root. Try sudo -E ./mocker")
+		os.Exit(1)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "child" {
 		child()
 		return
@@ -74,7 +106,7 @@ func run(args []string) {
 
 	// Set up cgroup before starting container
 	// For now hardcode limits, CLI flags come later
-	if err := setupCgroup(containerID, 128, 50); err != nil {
+	if err := setupCgroup(containerID, memLimit, cpuPercent); err != nil {
 		fmt.Println("Error setting up cgroup:", err)
 		os.Exit(1)
 	}
@@ -150,6 +182,9 @@ func child() {
 	// Set mount namespace so container has its own file system
 	// Unmount once process is finished
 	syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, "")
+
+	input, _ := os.ReadFile("/etc/resolv.conf")
+	os.WriteFile(filepath.Join(mergedDir, "etc/resolv.conf"), input, 0644)
 
 	// Pivot root to the container's merged directory
 	syscall.Chroot(mergedDir)
@@ -282,6 +317,9 @@ func addToCgroup(containerID string, pid int) error {
 
 func cleanupCgroup(containerID string) error {
 	cgPath := filepath.Join("/sys/fs/cgroup", "mocker-"+containerID)
+	if _, err := os.Stat(cgPath); os.IsNotExist(err) {
+		return nil
+	}
 	return os.Remove(cgPath)
 }
 
@@ -303,4 +341,59 @@ func ps() error {
 	}
 
 	return nil
+}
+
+func stop(cid string) error {
+	container, err := loadContainer(cid)
+	if err != nil {
+		return fmt.Errorf("Cannot find container with ID %v: %w", cid, err)
+	}
+	process, err := os.FindProcess(container.PID)
+	if err != nil {
+		return fmt.Errorf("Cannot find process with PID %v: %w", container.PID, err)
+	}
+	process.Signal(syscall.SIGTERM)
+	for i := 0; i < 10; i++ {
+		time.Sleep(1 * time.Second)
+		if err := process.Signal(syscall.Signal(0)); err != nil {
+			// process is gone, no need to SIGKILL
+			break
+		}
+		if i == 9 {
+			process.Signal(syscall.SIGKILL)
+		}
+	}
+
+	container.Status = "stopped"
+	saveContainerState(container)
+
+	return nil
+}
+
+func remove(cid string) error {
+	container, err := loadContainer(cid)
+	if err != nil {
+		return fmt.Errorf("Cannot find container with ID %v: %w", cid, err)
+	}
+	if container.Status != "stopped" {
+		return fmt.Errorf("Container is not yet stopped")
+	}
+	cleanupContainer(cid)
+	cleanupCgroup(cid)
+	path := filepath.Join(os.Getenv("HOME"), ".mocker", "containers", cid+".json")
+	os.Remove(path)
+
+	return nil
+}
+
+func loadContainer(containerID string) (Container, error) {
+	path := filepath.Join(os.Getenv("HOME"), ".mocker", "containers", containerID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Container{}, fmt.Errorf("container %s not found", containerID)
+	}
+
+	var container Container
+	err = json.Unmarshal(data, &container)
+	return container, err
 }
