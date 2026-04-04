@@ -19,14 +19,18 @@ A simple container runtime inspired by Docker using Go and Linux namespaces. Bui
 
 ### Installation
 ```bash
-git clone https://github.com/yourusername/mocker.git
+git clone https://github.com/gweinrich/mocker.git
 cd mocker
-go build -o mocker .
+go build -o mocker ./cmd/Mocker/
 ```
 
 ## Usage
 ### Run a container
 ```bash
+# Syntax
+sudo -E ./mocker run <command>
+
+# Example
 sudo -E ./mocker run /bin/sh
 ```
 
