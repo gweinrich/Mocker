@@ -1,4 +1,4 @@
-# Mocker
+# Mocker - Linux Container Runtime in Go
 A simple container runtime inspired by Docker using Go and Linux namespaces. Built to better understand how containers works.
 
 ## Features
